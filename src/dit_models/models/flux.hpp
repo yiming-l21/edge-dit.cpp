@@ -4906,6 +4906,19 @@ namespace Flux {
             return "flux";
         }
 
+        int64_t get_latent_channels() const {
+            if (version == VERSION_CHROMA_RADIANCE) {
+                return flux_params.in_channels;
+            }
+            const int64_t patch_area = static_cast<int64_t>(flux_params.patch_size) *
+                                       static_cast<int64_t>(flux_params.patch_size);
+            if (patch_area <= 0 || flux_params.out_channels <= 0 ||
+                flux_params.out_channels % patch_area != 0) {
+                return 0;
+            }
+            return flux_params.out_channels / patch_area;
+        }
+
         void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors, const std::string prefix) {
             flux.get_param_tensors(tensors, prefix);
         }
@@ -5133,10 +5146,28 @@ namespace Flux {
             if (latent_w <= 0 || latent_h <= 0) {
                 return 0;
             }
+            const int64_t latent_channels = get_latent_channels();
+            if (latent_channels <= 0) {
+                return 0;
+            }
             // Dummy shape-only inputs matching the real compute() call at flux_pipeline
-            // (x, timesteps, context, {}, y, guidance). Data is never read during measure.
-            sd::Tensor<float> x         = sd::zeros<float>({latent_w, latent_h, static_cast<int>(flux_params.in_channels), 1});
+            // (x, timesteps, context, c_concat, y, guidance). Data is never read during measure.
+            sd::Tensor<float> x         = sd::zeros<float>({latent_w, latent_h, static_cast<int>(latent_channels), 1});
             sd::Tensor<float> timesteps = sd::zeros<float>({1});
+            sd::Tensor<float> c_concat;
+            if (version != VERSION_CHROMA_RADIANCE) {
+                const int64_t patch_area = static_cast<int64_t>(flux_params.patch_size) *
+                                           static_cast<int64_t>(flux_params.patch_size);
+                const int64_t extra_patched_channels = flux_params.in_channels - flux_params.out_channels;
+                if (extra_patched_channels < 0 || extra_patched_channels % patch_area != 0) {
+                    return 0;
+                }
+                const int64_t concat_channels = extra_patched_channels / patch_area;
+                if (concat_channels > 0) {
+                    c_concat = sd::zeros<float>(
+                        {latent_w, latent_h, static_cast<int>(concat_channels), 1});
+                }
+            }
             // T5 context: [context_in_dim, tokens, 1]. Use 512 tokens (flux T5 max) so the
             // attention activation is measured at/above the real sequence length.
             sd::Tensor<float> context   = sd::zeros<float>(
@@ -5150,7 +5181,7 @@ namespace Flux {
                 guidance = sd::zeros<float>({1});
             }
             auto get_graph = [&]() -> ggml_cgraph* {
-                return build_graph(x, timesteps, context, {}, y, guidance, {}, false, {});
+                return build_graph(x, timesteps, context, c_concat, y, guidance, {}, false, {});
             };
             return measure_compute_buffer(get_graph);
         }

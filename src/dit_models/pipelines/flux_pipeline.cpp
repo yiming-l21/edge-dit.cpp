@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <sstream>
 
@@ -66,16 +67,6 @@ static const char* flux_pipeline_required_weights(SDVersion version) {
         return "transformer, text_encoder/LLM, and VAE";
     }
     return "transformer, CLIP-L, T5XXL, and VAE";
-}
-
-static int flux_pipeline_latent_channels(SDVersion version) {
-    if (ed_version_uses_flux2_vae(version)) {
-        return 128;
-    }
-    if (version == VERSION_CHROMA_RADIANCE) {
-        return 3;
-    }
-    return 16;
 }
 
 template <typename T>
@@ -1017,7 +1008,13 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     }
     rng->manual_seed(static_cast<uint64_t>(seed + batch_index));
 
-    const int latent_channels = flux_pipeline_latent_channels(version_);
+    const int64_t latent_channels = flux_runner_->get_latent_channels();
+    if (latent_channels <= 0 || latent_channels > std::numeric_limits<int>::max()) {
+        if (error != nullptr) {
+            *error = "failed to derive Flux latent channels from transformer output shape";
+        }
+        return false;
+    }
     sd::Tensor<float> init_latent = sd::zeros<float>({latent_w, latent_h, latent_channels, 1});
     sd::Tensor<float> noise = sd::Tensor<float>::randn(init_latent.shape(), rng);
     const int image_seq_len = (latent_w / patch_size) * (latent_h / patch_size);
